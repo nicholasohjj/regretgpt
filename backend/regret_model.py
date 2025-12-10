@@ -1,6 +1,7 @@
 # regret_model.py
 import os
 import json
+import re
 from datetime import datetime
 from typing import Dict, Any
 from dotenv import load_dotenv
@@ -18,19 +19,21 @@ genai.configure(api_key=api_key)
 
 # List of model names to try in order
 AVAILABLE_MODELS = [
-    "gemini-2.5-flash"
+    "gemma-3-27b-it",
+    "gemma-3-27b-instruct",
+    "gemini-2.5-flash"  # Fallback
 ]
 
 # Cache the working model name
 _cached_model_name = None
 
 def get_available_model():
-    """Return the cached model name or default to gemini-pro"""
+    """Return the cached model name or default to gemma-3-27b-it"""
     global _cached_model_name
     if _cached_model_name:
         return _cached_model_name
-    # Default to gemini-pro, will be updated on first successful call
-    return "gemini-pro"
+    # Default to gemma-3-27b-it, will be updated on first successful call
+    return "gemma-3-27b-it"
 
 REGRET_SYSTEM_PROMPT = """
 You are RegretGPT, an assistant that predicts whether a user will regret an action within the next 24 hours.
@@ -101,23 +104,38 @@ def classify_regret(payload: Dict[str, Any]) -> Dict[str, Any]:
     for model_name in AVAILABLE_MODELS:
       for attempt in range(max_retries):
         try:
-          # Configure the model with system instruction
-          model = genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=REGRET_SYSTEM_PROMPT
-          )
-
-          # Create the user prompt
-          user_content = f"{user_prompt}"
+          # Gemma models don't support system_instruction or JSON mode
+          # For Gemini models, we can use both
+          is_gemma_model = "gemma" in model_name.lower()
           
-          # Generate content with JSON response format
-          response = model.generate_content(
-            user_content,
-            generation_config={
+          if is_gemma_model:
+            # For Gemma: include system prompt in the user content and request JSON format
+            model = genai.GenerativeModel(model_name=model_name)
+            # Add explicit JSON format request to the prompt
+            gemma_prompt = f"{REGRET_SYSTEM_PROMPT}\n\nIMPORTANT: You must respond with ONLY a valid JSON object, no other text. The JSON must have these exact keys: regret_score (int), reason (string), intervention_strength (string), llm_message (string), future_regret_simulation (string).\n\nUser input:\n{user_prompt}"
+            user_content = gemma_prompt
+            # Gemma doesn't support JSON mode, so we don't use response_mime_type
+            generation_config = {
+              "temperature": 0.7,
+              "max_output_tokens": 500
+            }
+          else:
+            # For Gemini: use system_instruction parameter and JSON mode
+            model = genai.GenerativeModel(
+              model_name=model_name,
+              system_instruction=REGRET_SYSTEM_PROMPT
+            )
+            user_content = f"{user_prompt}"
+            generation_config = {
               "response_mime_type": "application/json",
               "temperature": 0.7,
               "max_output_tokens": 500
             }
+          
+          # Generate content
+          response = model.generate_content(
+            user_content,
+            generation_config=generation_config
           )
           
           # Success! Cache this model name
@@ -167,7 +185,39 @@ def classify_regret(payload: Dict[str, Any]) -> Dict[str, Any]:
       raise Exception("No response received from model")
       
     try:
-      data = json.loads(response.text)
+      response_text = response.text if hasattr(response, 'text') else str(response)
+      
+      # For Gemma models, the response might be wrapped in markdown code blocks or have extra text
+      # Try to extract JSON from the response
+      
+      # Clean up common markdown formatting first
+      response_text = response_text.strip()
+      if response_text.startswith('```json'):
+        response_text = response_text[7:].strip()
+      elif response_text.startswith('```'):
+        response_text = response_text[3:].strip()
+      if response_text.endswith('```'):
+        response_text = response_text[:-3].strip()
+      
+      # Try to find JSON object in the response (better handling of nested objects)
+      # Look for the first { and try to find matching }
+      start_idx = response_text.find('{')
+      if start_idx != -1:
+        # Count braces to find the matching closing brace
+        brace_count = 0
+        end_idx = start_idx
+        for i in range(start_idx, len(response_text)):
+          if response_text[i] == '{':
+            brace_count += 1
+          elif response_text[i] == '}':
+            brace_count -= 1
+            if brace_count == 0:
+              end_idx = i
+              break
+        if brace_count == 0:
+          response_text = response_text[start_idx:end_idx + 1]
+      
+      data = json.loads(response_text)
     except (json.JSONDecodeError, AttributeError) as e:
       print(f"JSON parsing error: {e}")
       print(f"Response text: {response.text if hasattr(response, 'text') else 'No text attribute'}")

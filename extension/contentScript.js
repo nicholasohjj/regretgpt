@@ -11,6 +11,8 @@ const DEFAULT_CONFIG = {
 
 let config = { ...DEFAULT_CONFIG };
 let lastTextSent = "";
+let lastTextChecked = ""; // Track the last text we checked (to prevent duplicate requests)
+let currentRequestText = ""; // Track text currently being checked
 let activeInput = null;
 let activeSendButton = null;
 let overlayElement = null;
@@ -21,6 +23,7 @@ let isSendButtonHooked = false;
 let debounceTimer = null;
 let abortController = null;
 let autoHideTimer = null; // Timer for auto-hiding overlay for low scores
+let pendingRequestPromise = null; // Track the current request promise to reuse it
 
 console.log("[RegretGPT] Content script loaded");
 
@@ -197,6 +200,7 @@ function hideOverlay() {
   if (overlayElement) overlayElement.style.display = "none";
   isInterventionActive = false;
   isChecking = false; // Reset checking flag when overlay is hidden
+  currentRequestText = ""; // Clear tracked text
   currentPuzzle = null;
   pendingSendAction = null;
 }
@@ -303,7 +307,7 @@ function handleSendAnywayClick() {
 
 // Send text to backend for classification with timeout
 async function checkRegretAndMaybeIntervene(text, context) {
-  // Cancel any pending request
+  // Cancel any pending request (for different text)
   if (abortController) {
     abortController.abort();
   }
@@ -368,7 +372,22 @@ async function handleMessageSend(input, sendButton) {
     return false; // Let message send normally
   }
 
-  // Block if intervention is active OR if we're currently checking
+  const text = input.innerText.trim() || input.textContent.trim();
+  console.log("[RegretGPT] Intercepted message:", text);
+
+  if (!text) {
+    console.log("[RegretGPT] Empty message, allowing send");
+    return false; // Allow empty message to send
+  }
+
+  // Prevent duplicate requests for the same text
+  // If we're already checking this exact text, block and wait
+  if (isChecking && currentRequestText === text) {
+    console.log("[RegretGPT] Already checking this exact message, blocking duplicate");
+    return true; // Blocked - already checking
+  }
+
+  // Block if intervention is active OR if we're currently checking a different message
   if (isInterventionActive || isChecking) {
     console.log("[RegretGPT] Blocking send - intervention active or check in progress");
     return true; // Blocked
@@ -380,26 +399,50 @@ async function handleMessageSend(input, sendButton) {
     debounceTimer = null;
   }
 
-  // Immediately set checking flag to block subsequent attempts
+  // Immediately set checking flag and track the text to block subsequent attempts
   isChecking = true;
-
-  const text = input.innerText.trim() || input.textContent.trim();
-  console.log("[RegretGPT] Intercepted message:", text);
-
-  if (!text) {
-    console.log("[RegretGPT] Empty message, allowing send");
-    isChecking = false; // Reset flag
-    return false; // Allow empty message to send
-  }
+  currentRequestText = text;
 
   // Debounce: wait a bit before checking (user might still be typing)
   debounceTimer = setTimeout(async () => {
     try {
-      console.log("[RegretGPT] Checking with backend...");
-      const { shouldBlock, data, error, showOverlay: shouldShowOverlay } = await checkRegretAndMaybeIntervene(text, {
-        app: "telegram",
-        reason_hint: "messaging"
-      });
+      // Double-check: if text changed during debounce, don't check
+      const currentText = input.innerText.trim() || input.textContent.trim();
+      if (currentText !== text) {
+        console.log("[RegretGPT] Text changed during debounce, cancelling check");
+        isChecking = false;
+        currentRequestText = "";
+        return;
+      }
+
+      // If we already have a pending request for this exact text, reuse it
+      let shouldBlock, data, error, shouldShowOverlay;
+      
+      if (pendingRequestPromise && lastTextChecked === text) {
+        console.log("[RegretGPT] Reusing existing request for this message");
+        const result = await pendingRequestPromise;
+        shouldBlock = result.shouldBlock;
+        data = result.data;
+        error = result.error;
+        shouldShowOverlay = result.showOverlay;
+      } else {
+        console.log("[RegretGPT] Checking with backend...");
+        // Create new request and store the promise
+        pendingRequestPromise = checkRegretAndMaybeIntervene(text, {
+          app: "telegram",
+          reason_hint: "messaging"
+        });
+        lastTextChecked = text;
+        
+        const result = await pendingRequestPromise;
+        shouldBlock = result.shouldBlock;
+        data = result.data;
+        error = result.error;
+        shouldShowOverlay = result.showOverlay;
+        
+        // Clear the promise after completion
+        pendingRequestPromise = null;
+      }
 
       console.log("[RegretGPT] Backend response - shouldBlock:", shouldBlock, "score:", data?.regret_score);
 
@@ -434,6 +477,7 @@ async function handleMessageSend(input, sendButton) {
             console.log("[RegretGPT] Auto-hiding overlay and sending message");
             if (pendingSendAction) {
               isChecking = false; // Reset flag before sending
+              currentRequestText = ""; // Clear tracked text
               pendingSendAction();
             }
             hideOverlay();
@@ -444,11 +488,14 @@ async function handleMessageSend(input, sendButton) {
         // No data or error - allow message to send
         console.log("[RegretGPT] No data or error, allowing send");
         isChecking = false; // Reset flag before sending
+        currentRequestText = ""; // Clear tracked text
         sendAction();
       }
     } catch (error) {
       console.error("[RegretGPT] Error during check:", error);
       isChecking = false; // Reset flag on error
+      currentRequestText = ""; // Clear tracked text
+      pendingRequestPromise = null; // Clear promise on error
       // On error, allow the message to send
       if (sendButton) {
         sendButton.click();
