@@ -174,7 +174,12 @@ function showOverlay(data, sendAction) {
   reasonEl.textContent = `Reason: ${data.reason || "High-regret behaviour detected."}`;
   simEl.textContent = data.simulation || "";
 
-  if (data.intervention_strength === "BLOCK_HARD" || data.intervention_strength === "PUZZLE") {
+  // Always require puzzle for high-regret scores (≥threshold) OR if AI explicitly says so
+  const requiresPuzzle = data.regret_score >= config.regretThreshold || 
+                         data.intervention_strength === "BLOCK_HARD" || 
+                         data.intervention_strength === "PUZZLE";
+  
+  if (requiresPuzzle) {
     puzzleEl.classList.remove("hidden");
     generatePuzzle();
   } else {
