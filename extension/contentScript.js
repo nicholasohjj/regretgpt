@@ -20,6 +20,7 @@ let isHooked = false;
 let isSendButtonHooked = false;
 let debounceTimer = null;
 let abortController = null;
+let autoHideTimer = null; // Timer for auto-hiding overlay for low scores
 
 console.log("[RegretGPT] Content script loaded");
 
@@ -182,6 +183,12 @@ function showOverlay(data, sendAction) {
 }
 
 function hideOverlay() {
+  // Clear any auto-hide timer
+  if (autoHideTimer) {
+    clearTimeout(autoHideTimer);
+    autoHideTimer = null;
+  }
+  
   if (overlayElement) overlayElement.style.display = "none";
   isInterventionActive = false;
   isChecking = false; // Reset checking flag when overlay is hidden
@@ -328,17 +335,13 @@ async function checkRegretAndMaybeIntervene(text, context) {
     const data = await res.json();
     console.log("[RegretGPT] Backend response:", data);
 
-    if (data.regret_score >= config.regretThreshold) {
-      return {
-        shouldBlock: true,
-        data
-      };
-    } else {
-      return {
-        shouldBlock: false,
-        data
-      };
-    }
+    // Always return data, but indicate if it should block based on threshold
+    const shouldBlock = data.regret_score >= config.regretThreshold;
+    return {
+      shouldBlock: shouldBlock,
+      data: data,
+      showOverlay: true // Always show overlay, even for low scores
+    };
   } catch (e) {
     clearTimeout(timeoutId);
     if (e.name === 'AbortError') {
@@ -388,7 +391,7 @@ async function handleMessageSend(input, sendButton) {
   debounceTimer = setTimeout(async () => {
     try {
       console.log("[RegretGPT] Checking with backend...");
-      const { shouldBlock, data, error } = await checkRegretAndMaybeIntervene(text, {
+      const { shouldBlock, data, error, showOverlay: shouldShowOverlay } = await checkRegretAndMaybeIntervene(text, {
         app: "telegram",
         reason_hint: "messaging"
       });
@@ -414,12 +417,27 @@ async function handleMessageSend(input, sendButton) {
         }
       };
 
-      if (shouldBlock) {
-        console.log("[RegretGPT] Blocking message, showing overlay");
+      // Always show overlay if data exists
+      if (data && shouldShowOverlay) {
+        console.log("[RegretGPT] Showing overlay with score:", data.regret_score);
         showOverlay(data, sendAction);
+        
+        // If score is below threshold, auto-hide after 2 seconds and send
+        if (!shouldBlock) {
+          console.log("[RegretGPT] Low score detected, will auto-hide in 2 seconds");
+          autoHideTimer = setTimeout(() => {
+            console.log("[RegretGPT] Auto-hiding overlay and sending message");
+            if (pendingSendAction) {
+              isChecking = false; // Reset flag before sending
+              pendingSendAction();
+            }
+            hideOverlay();
+          }, 2000); // 2 seconds
+        }
         // Keep isChecking = true while overlay is shown (isInterventionActive will be true)
       } else {
-        console.log("[RegretGPT] Message allowed, sending");
+        // No data or error - allow message to send
+        console.log("[RegretGPT] No data or error, allowing send");
         isChecking = false; // Reset flag before sending
         sendAction();
       }
