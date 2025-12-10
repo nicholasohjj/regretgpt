@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "RegretGPT – Impulse Control Assistant",
+  "version": "1.0.0",
+  "description": "Intercepts high-regret messages and forces you to think before you send.",
+  "permissions": [
+    "scripting",
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://web.telegram.org/*",
+    "https://mail.google.com/*",
+    "https://www.instagram.com/*",
+    "https://web.whatsapp.com/*",
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://web.telegram.org/*",
+        "https://mail.google.com/*",
+        "https://www.instagram.com/*",
+        "https://web.whatsapp.com/*"
+      ],
+      "js": ["contentScript.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "RegretGPT"
+  }
+}
