@@ -9,11 +9,17 @@ from typing import Optional, Dict, Any
 from dotenv import load_dotenv
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
 
 # Load environment variables
 load_dotenv()
 
 from regret_model import classify_regret
+
+# Create a thread pool executor for running blocking operations
+# This allows multiple concurrent requests to be processed in parallel
+executor = ThreadPoolExecutor(max_workers=10)
 
 # Configure logging
 logging.basicConfig(
@@ -79,6 +85,9 @@ async def classify(req: ClassifyRequest):
     Classify text for regret potential.
     
     Returns a regret score (0-100) and intervention recommendations.
+    
+    This endpoint can handle multiple concurrent requests from different users and browsers.
+    The blocking Gemini API calls are executed in a thread pool to maintain concurrency.
     """
     try:
         logger.info(f"Classifying text (length: {len(req.typed_text)}) from {req.url}")
@@ -87,7 +96,10 @@ async def classify(req: ClassifyRequest):
         if len(req.typed_text) > 10000:
             raise ValueError("Text exceeds maximum length of 10000 characters")
         
-        result = classify_regret(req.model_dump())
+        # Run the blocking classify_regret function in a thread pool
+        # This allows multiple requests to be processed concurrently
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(executor, classify_regret, req.model_dump())
         
         # Validate result structure
         if not isinstance(result.get("regret_score"), int):
@@ -125,11 +137,14 @@ async def classify(req: ClassifyRequest):
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     host = os.getenv("HOST", "0.0.0.0")
-    logger.info(f"Starting RegretGPT backend on {host}:{port}")
+    workers = int(os.getenv("WORKERS", 1))  # Number of worker processes (1 for development, 4+ for production)
+    logger.info(f"Starting RegretGPT backend on {host}:{port} with {workers} worker(s)")
+    logger.info("Backend is configured to handle multiple concurrent requests from different users and browsers")
     uvicorn.run(
         app,
         host=host,
         port=port,
         log_level="info",
-        timeout_keep_alive=30
+        timeout_keep_alive=30,
+        workers=workers if workers > 1 else None  # Use multiple workers in production
     )
